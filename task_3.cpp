@@ -156,11 +156,18 @@ public:
 class Bus : public Bus_if , public sc_module
 {
 public:
-    enum Function
+    enum Function //valid invalid functions
     {
         FUNC_READ,
         FUNC_WRITE,
         FUNC_READ_X
+    };
+    
+    enum Signal //Moesi signals
+    {
+        BUS_READ,
+        BUS_READ_X,
+        BUS_UPGRADE
     };
     // ports
     sc_in<bool>             Port_CLK;
@@ -169,6 +176,8 @@ public:
     sc_out<Function>        Port_BusFunction;
     sc_out<int>             Port_BusLocked;
     
+    int total_wait_duration = 0;
+    int access_count = 0;
     sc_mutex            mutex; 
 public:
     SC_CTOR(Bus)
@@ -183,8 +192,10 @@ public:
     virtual bool read(uint32_t addr, int cache_id)
     {
         // Bus might be in contention
-        
+        uint64 before = sc_time_stamp().value();
         mutex.lock();
+        uint64 after = sc_time_stamp().value();
+        update_access_stats(after-before);
         busWriter = cache_id;
         Port_BusWriter.write(busWriter);
         //Port_BusLocked.write(1);
@@ -201,7 +212,10 @@ public:
     {
         
         // Bus might be in contention
+        uint64 before = sc_time_stamp().value();
         mutex.lock();
+        uint64 after = sc_time_stamp().value();
+        update_access_stats(after-before);
         busWriter = cache_id;
         Port_BusWriter.write(busWriter);
         //Port_BusLocked.write(1);
@@ -220,7 +234,10 @@ public:
         //    wait();
         //}
         // Handle contention if any
+        uint64 before = sc_time_stamp().value();
         mutex.lock();
+        uint64 after = sc_time_stamp().value();
+        update_access_stats(after-before);
         busWriter = cache_id;
         Port_BusWriter.write(busWriter);
         
@@ -235,11 +252,19 @@ public:
         return true;
     }
     
+    //Returns the average time it takes for a thread to lock the mutex
+    uint64 get_average_wait(){
+        return total_wait_duration / access_count;
+    }
     
 private:
     bool                    locked;
     int                     busWriter;
     
+    void update_access_stats(int duration){
+        access_count++;
+        total_wait_duration = duration+ total_wait_duration;
+    }
 
 };
 
@@ -259,6 +284,15 @@ public:
     {
         RET_READ_DONE,
         RET_WRITE_DONE,
+    };
+    
+    enum MOESIState
+    {
+        MODIFIED,
+        OWNED,
+        EXCLUSIVE,
+        SHARED,
+        INVALID
     };
 
     enum HitType //enum not displayed in waveform file, replaced by integers
@@ -315,6 +349,7 @@ private:
     short lru[SET_COUNT][SET_SIZE];                 //lru number for each line, could be done differently
     int tags[SET_COUNT][SET_SIZE];                  //tags for each line in the cache
     bool valid[SET_COUNT][SET_SIZE];
+    MOESIState moesi[SET_COUNT][SET_SIZE];                 //number values represent state
     
     void execute()
     {
@@ -854,7 +889,11 @@ int sc_main(int argc, char* argv[])
         }
         int stop = clock();
         
-        cout << "Duration: " << (stop - start)/double(CLOCKS_PER_SEC)*1000 <<"ms"<< endl;
+        //The time measures can be based on real time or simulation time
+        //The duration it takes a thread to lock the bus mutex is given in simulation time
+        cout << "Average Wait Duration for Bus Access(Simulation Time): " << bus.get_average_wait() << "ns" <<endl;
+        //The total duration of the execution of this Program is given in real time
+        cout << "Total Duration: " << (stop - start)/double(CLOCKS_PER_SEC)*1000 <<"ms"<< endl;
 
     }
 
