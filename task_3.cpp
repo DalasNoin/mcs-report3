@@ -163,6 +163,7 @@ public:
 			SHARED,   //If cache to chache transfer
 			EXCLUSIVE //If memory to cache transfer
 		};
+
 		enum Function //valid invalid functions
 		{
 				FUNC_READ,
@@ -451,6 +452,8 @@ private:
 
 						if (f == FUNC_READ)
 						{
+							read(tag,index,offset,addr);
+							/*
 								int set_index = hit(index,tag); //set index should be called line index
 								if(set_index == -1){
 										Port_Hit.write(0);
@@ -482,11 +485,12 @@ private:
 								Port_Done.write( RET_READ_DONE );
 								Port_Line.write(set_index);
 								wait();
-								Port_Data.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
+								Port_Data.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");*/
 						}
 						else //if write
 						{
-
+							write(tag,index,offset,addr,data);
+								/*
 								int set_index = hit(index,tag);
 								if(set_index == -1){  //no hit
 										Port_Hit.write(2);
@@ -513,34 +517,153 @@ private:
 								Port_Line.write(set_index);
 								c_data[index][set_index*LINE_SIZE + offset] = data; //only overwrites one byte, not fully correct
 
-								Port_Done.write( RET_WRITE_DONE );
+								Port_Done.write( RET_WRITE_DONE );*/
 						}
 				}
 		}
 
-		void read(uint32_t tag,uint32_t index,uint32_t offset,uint32_t address){
+		//read request from cpu
+		void read(uint32_t tag,uint32_t index,uint32_t offset,uint32_t addr)
+			{
+					int line = hit(index,tag);
+					MOESIState state = INVALID;
 
+					//Statistics
+					if(line == -1){
+							Port_Hit.write(0);
+
+					} else {
+						state = moesi[index][line];
+						switch(state){
+							case INVALID:
+								Port_Hit.write(0);
+								break;
+							default:
+								Port_Hit.write(1);
+								break;
+						}
+					}
+					//End Statistics
+
+					bool shared = false;
+					if (line == -1){           //if miss simulate a read from the memory
+
+
+
+							shared = Port_Bus->read(addr,cache_id);
+																 // This simulates memory read/write delay
+							line = get_lru(index); //get the lru index
+							tags[index][line]=tag; //simulate read, copy data from memory to the cache
+							c_data[index][line*LINE_SIZE + offset] = line*offset; //random value instead of value from memory
+							moesi[index][line] = shared ? SHARED : EXCLUSIVE;
+					} else {	//if hit, check the state of the line
+						switch(state){
+							case INVALID:
+								shared = Port_Bus->read(addr,cache_id);
+								moesi[index][line] = shared ? SHARED : EXCLUSIVE;
+								break;
+							default:
+								break;
+						}
+
+
+					}
+
+					Port_Data.write(c_data[index][line*LINE_SIZE + offset]);
+					mru(index,line);
+					Port_Done.write( RET_READ_DONE );
+					Port_Line.write(line);
+					wait();
+					Port_Data.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
 		}
 
-		void write(uint32_t tag,uint32_t index,uint32_t offset,uint32_t address,int data){
+		//write request from cpu
+		void write(uint32_t tag,uint32_t index,uint32_t offset,uint32_t addr,int data){
+
+			int line = hit(index,tag);
+			MOESIState state = INVALID;
+
+			//Statistics
+			if(line == -1){
+					Port_Hit.write(2);
+			} else {
+				state = moesi[index][line];
+				switch(state){
+					case INVALID:
+						Port_Hit.write(2);
+						break;
+					default:
+						Port_Hit.write(3);
+						break;
+				}
+			}
+			//End Statistics
+
+			if(line == -1){  //no hit
+					line = get_lru(index);
+					tags[index][line]=tag;
+
+			}
+
+			switch(state){
+				case MODIFIED: //write in cache
+					break;
+				case OWNED:    //write in cache, bus upgrade, switch to modified
+					Port_Bus->upgrade(addr,data, cache_id);
+					moesi[index][line] = MODIFIED;
+					break;
+				case EXCLUSIVE: //write in cache, switch to modified
+					moesi[index][line] = MODIFIED;
+					break;
+				case SHARED:   //write in cache, bus upgrade, switch to modified
+					Port_Bus->upgrade(addr,data, cache_id);
+					moesi[index][line] = MODIFIED;
+					break;
+				case INVALID:  //readX, write in cache, switch to modified
+					Port_Bus->read_x(addr,cache_id);
+					moesi[index][line] = MODIFIED;
+					break;
+			}
+
+			//index in the set of the cache
+			mru(index,line);
+			Port_Line.write(line);
+			c_data[index][line*LINE_SIZE + offset] = data;
+			wait();
+			Port_Done.write( RET_WRITE_DONE );
 
 		}
 
 		void snoop_bus(){
 				snoop_counter = 0;
 				while(true){
-						cout << snoop_counter+ cache_id << " executed"<<endl;
+						//cout << cache_id << " executed"<<endl;
 						wait();
 
-						wait(Port_BusFunction.value_changed_event());
-
+						wait(Port_BusRequest.value_changed_event());
+						Bus::RequestType request = Port_BusRequest.read();
 
 						int busWriter = Port_BusWriter.read();
-			//uint32_t addr = 0;
+						if(busWriter == cache_id){
+
+								continue;
+						}
+
+						uint32_t addr = 0;
 						//cout << Port_BusAddress.read().to_string() << endl;
 						//cout << Port_BusAddress.read().to_int()<<" as int" << endl;
-						uint32_t addr = Port_BusAddress.read().to_int();
-
+						//uint32_t addr = Port_BusAddress.read().to_int();
+						auto address = Port_BusAddress.read();
+				    if(address.to_string().find('X') != std::string::npos)
+				    {
+		                for(int i = 0 ; i<32;i++){
+		                    if(address[i] =='X')
+		                        address[i]='1';
+		                }
+				    }
+            //cout << address << " versuchte conversion"<< endl;
+            //cout << address.to_int()<<" as int after conversion" << endl;
+            addr = address.to_int();
 						//cout << address << " versuchte conversion"<< endl;
 						//cout << address.to_int()<<" as int after conversion" << endl;
 						//addr = address.to_int();
@@ -548,10 +671,7 @@ private:
 
 
 
-						if(busWriter == cache_id){
 
-								continue;
-						}
 
 
 						//uint32_t offset = (addr & 31);                   //first 5 bit are the offset
@@ -569,19 +689,67 @@ private:
 								snoop_counter++;
 
 						MOESIState state = moesi[index][line];
+						if(request == Bus::BUS_READ_X){
+							switch(state){
+								case MODIFIED: //flush, cahgne state to invalid
+									Port_Bus->flush(addr,0,cache_id);
+									moesi[index][line] = INVALID;
+									break;
+								case OWNED: //flush, change to invalid
+									Port_Bus->flush(addr,0,cache_id);
+									moesi[index][line] = INVALID;
+									break;
+								case EXCLUSIVE: //flush, change to invalid
+									Port_Bus->flush(addr,0,cache_id);
+									moesi[index][line] = INVALID;
+									break;
+								case SHARED: // change to invalid
+								moesi[index][line] = INVALID;
+									break;
+								case INVALID: //-
+									break;
+							}
 
-						switch(state){
-							case MODIFIED:
-								break;
-							case OWNED:
-								break;
-							case EXCLUSIVE:
-								break;
-							case SHARED:
-								break;
-							case INVALID:
-								break;
+						} else if(request == Bus::BUS_READ) {
+							switch(state){
+								case MODIFIED: //flush, change to owned
+									Port_Bus->flush(addr,0,cache_id);
+									moesi[index][line] = OWNED;
+									break;
+								case OWNED: //flush
+									Port_Bus->flush(addr,0,cache_id);
+									break;
+								case EXCLUSIVE: //flush, change to owned
+									moesi[index][line] = OWNED;
+									Port_Bus->flush(addr,0,cache_id);
+									break;
+								case SHARED: //-
+									break;
+								case INVALID://-
+									break;
+							}
+
+						} else if(request == Bus::BUS_UPGRADE) {
+							switch(state){
+								case MODIFIED:  //not possible
+									break;
+								case OWNED:			//change to invalid
+									moesi[index][line] = INVALID;
+									break;
+								case EXCLUSIVE: //not possible
+									break;
+								case SHARED:		//change to invalid
+									moesi[index][line] = INVALID;
+									break;
+								case INVALID:		//-
+									break;
+							}
+
 						}
+						//Flush is handeld in a different way than the other requests
+
+						}
+
 						/*
 
 						if(Func == Bus::FUNC_READ)  //BusRd does not cause change state
@@ -594,7 +762,7 @@ private:
 						*/
 				}
 
-		}
+
 
 
 
@@ -884,11 +1052,11 @@ int sc_main(int argc, char* argv[])
 
 				//Bus
 				sc_signal<Bus::Function, SC_MANY_WRITERS>        sigBusFunction;
-				sc_signal<Bus::RequestType>                      sigBusRequest;
-				sc_signal<bool>                                  sigBusShared;
+				sc_signal<Bus::RequestType, SC_MANY_WRITERS>     sigBusRequest;
+				sc_signal<bool, SC_MANY_WRITERS>                 sigBusShared;
 				sc_signal<int, SC_MANY_WRITERS>                  sigBusLocked;
 				sc_signal<int, SC_MANY_WRITERS>                  sigBusWriter;
-				sc_signal_rv<32>                				 sigBusAddress;
+				sc_signal_rv<32>    		  			 sigBusAddress;
 				// Signals
 				sc_buffer<Cache::Function> sigMemFunc[num_cpus];
 				sc_buffer<Cache::RetCode>  sigMemDone[num_cpus];
