@@ -185,12 +185,18 @@ public:
 		sc_out<Function>        Port_BusFunction;
 		sc_out<RequestType>     Port_BusRequest;
 		sc_out<int>             Port_BusLocked;
-		sc_out<bool>            Port_BusShared; //Shared is true for a cache to cache transfer, false for memory to cache
+		sc_out<int>            Port_BusShared; //Shared is true for a cache to cache transfer, false for memory to cache
 
 
 		uint64 total_wait_duration = 0;
+		uint64 total_usage_duration = 0;
 		int access_count = 0;
 		sc_mutex            mutex;
+		int flush_count = 0;
+		int flush_received_count = 0;
+		int upgr_count = 0;
+		int read_count = 0;
+		int read_x_count = 0;
 public:
 		SC_CTOR(Bus)
 		{
@@ -211,7 +217,9 @@ public:
 				uint64 before = sc_time_stamp().value();
 				mutex.lock();
 				uint64 after = sc_time_stamp().value();
+				read_count++;
 				update_access_stats(after-before);
+				before = sc_time_stamp().value();
 				busWriter = cache_id;
 				Port_BusWriter.write(busWriter);
 				//Port_BusLocked.write(1);
@@ -219,14 +227,18 @@ public:
 				//cout << addr<<"  "<<busWriter <<endl;
 				Port_BusFunction.write(FUNC_READ);
 				Port_BusRequest.write(BUS_READ);
-				wait(1);
-				if(true == Port_BusShared.read())
+				wait(99,SC_NS,Port_BusShared.value_changed_event());
+				after = sc_time_stamp().value();
+				update_usage_stats(after-before);
+				if(1 == Port_BusShared.read())
 				{
 						mutex.unlock();
+						Port_BusShared.write(0);
+						flush_received_count++;
 						return true;
 				}
-				Port_BusShared.write(false);
-				wait(98);
+				//Port_BusShared.write('0');
+				//wait(98);
 				//Port_BusLocked.write(0);
 				mutex.unlock();
 				return false;
@@ -244,7 +256,9 @@ public:
 				uint64 before = sc_time_stamp().value();
 				mutex.lock();
 				uint64 after = sc_time_stamp().value();
+				read_x_count++;
 				update_access_stats(after-before);
+				before = sc_time_stamp().value();
 				busWriter = cache_id;
 				Port_BusWriter.write(busWriter);
 				//Port_BusLocked.write(1);
@@ -252,14 +266,18 @@ public:
 				//cout << addr <<endl;
 				Port_BusFunction.write(FUNC_READ_X);
 				Port_BusRequest.write(BUS_READ_X);
-				wait(1);
-				if(true == Port_BusShared.read())
+				wait(99,SC_NS,Port_BusShared.value_changed_event());
+				after = sc_time_stamp().value();
+				update_usage_stats(after-before);
+				if(1 == Port_BusShared.read())
 				{
+						Port_BusShared.write(0);
 						mutex.unlock();
+						flush_received_count++;
 						return true;
 				}
-				Port_BusShared.write(false);
-				wait(98);
+				//Port_BusShared.write(false);
+				//wait(98);
 				//Port_BusLocked.write(0);
 				mutex.unlock();
 				return false;
@@ -276,14 +294,17 @@ public:
 				mutex.lock();
 				uint64 after = sc_time_stamp().value();
 				update_access_stats(after-before);
+				before = sc_time_stamp().value();
 				busWriter = cache_id;
 				Port_BusWriter.write(busWriter);
 
-				//Port_BusLocked.write(1);
+				Port_BusLocked.write(1);
 				Port_BusAddress.write(addr);//bitset< 32 >( addr ).to_string());
 				//cout << addr <<endl;
 				Port_BusFunction.write(FUNC_WRITE);
 				wait(99);
+				after = sc_time_stamp().value();
+				update_usage_stats(after-before);
 				//Port_BusLocked.write(0);
 				mutex.unlock();
 				// Data does not have to be handled in the simulation
@@ -291,18 +312,25 @@ public:
 		}
 
 		virtual bool flush(uint32_t addr, int data, int cache_id){
-			Port_BusShared.write(true);
-			Port_BusRequest.write(FLUSH);
+			Port_BusShared.write(1);
+			flush_count++;
+			//Port_BusRequest.write(FLUSH); //is this a good idea? bus shared may be enough
 			return true;
 		}
 
 		virtual bool upgrade(uint32_t addr, int data, int cache_id){
+			uint64 before = sc_time_stamp().value();
 			mutex.lock();
+			uint64 after = sc_time_stamp().value();
+			upgr_count++;
+			update_access_stats(after-before);
 			busWriter = cache_id;
 			Port_BusWriter.write(busWriter);
 			Port_BusRequest.write(BUS_UPGRADE);
 			Port_BusAddress.write(addr);
-			wait(99);
+			//wait(99);
+			//
+			wait();
 			mutex.unlock();
 			return true;
 		}
@@ -312,13 +340,22 @@ public:
 				return total_wait_duration / access_count /1000;
 		}
 
+		uint64 get_average_memory_access(){
+				return total_usage_duration / access_count /1000;
+		}
+
 private:
 		bool                    locked;
 		int                     busWriter;
 
+		//update time for access to bus
 		void update_access_stats(int duration){
 				access_count++;
 				total_wait_duration = duration+ total_wait_duration;
+		}
+		//update time for execution of a request
+		void update_usage_stats(int duration){
+				total_usage_duration = duration+ total_usage_duration;
 		}
 
 };
@@ -377,7 +414,7 @@ public:
 		sc_in<int>      Port_BusWriter;
 		sc_in<Bus::Function>        Port_BusFunction;
 		sc_in<Bus::RequestType>     Port_BusRequest;
-		sc_in<bool>     Port_BusShared; // true for cache to cache transfer, false for memory to cache
+		sc_in<int>     Port_BusShared; // true for cache to cache transfer, false for memory to cache
 
 
 		SC_CTOR(Cache)
@@ -453,71 +490,11 @@ private:
 						if (f == FUNC_READ)
 						{
 							read(tag,index,offset,addr);
-							/*
-								int set_index = hit(index,tag); //set index should be called line index
-								if(set_index == -1){
-										Port_Hit.write(0);
-								} else if (valid[index][set_index]==false){
-										Port_Hit.write(0);
-								} else if (valid[index][set_index]==true){
-										Port_Hit.write(1);
-								}
-								if (set_index == -1){           //if miss simulate a read from the memory
 
-
-
-										Port_Bus->read(addr,cache_id);
-																			 // This simulates memory read/write delay
-										set_index = get_lru(index); //get the lru index
-										tags[index][set_index]=tag; //simulate read, copy data from memory to the cache
-										c_data[index][set_index*LINE_SIZE + offset] = set_index*offset; //random value instead of value from memory
-										valid[index][set_index] = true;
-								}
-								if(valid[index][set_index]==false){
-
-										Port_Bus->read(addr,cache_id);
-										valid[index][set_index] = true;
-
-								}
-
-								Port_Data.write(c_data[index][set_index*LINE_SIZE + offset]);
-								mru(index,set_index);
-								Port_Done.write( RET_READ_DONE );
-								Port_Line.write(set_index);
-								wait();
-								Port_Data.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");*/
 						}
 						else //if write
 						{
 							write(tag,index,offset,addr,data);
-								/*
-								int set_index = hit(index,tag);
-								if(set_index == -1){  //no hit
-										Port_Hit.write(2);
-										set_index = get_lru(index);
-										tags[index][set_index]=tag;
-										valid[index][set_index] = true;
-										Port_Bus->write(addr,0,cache_id);
-
-								} else { //hit
-
-										if(valid[index][set_index]==false){  //hit but invalid
-												Port_Hit.write(2);
-												Port_Bus->read_x(addr,cache_id); // read entire cache line before write
-												valid[index][set_index] = true;
-
-										} else {
-												Port_Hit.write(3);
-										}
-
-										Port_Bus->write(addr,0,cache_id);
-								}
-								//index in the set of the cache
-								mru(index,set_index);
-								Port_Line.write(set_index);
-								c_data[index][set_index*LINE_SIZE + offset] = data; //only overwrites one byte, not fully correct
-
-								Port_Done.write( RET_WRITE_DONE );*/
 						}
 				}
 		}
@@ -529,6 +506,7 @@ private:
 					MOESIState state = INVALID;
 
 					//Statistics
+
 					if(line == -1){
 							Port_Hit.write(0);
 
@@ -550,23 +528,26 @@ private:
 
 
 
-							shared = Port_Bus->read(addr,cache_id);
-																 // This simulates memory read/write delay
+							//shared = Port_Bus->read(addr,cache_id);
+
 							line = get_lru(index); //get the lru index
+							//if lru is in state OWNED write back to Memory
+							save_owned(index,line,addr);
 							tags[index][line]=tag; //simulate read, copy data from memory to the cache
-							c_data[index][line*LINE_SIZE + offset] = line*offset; //random value instead of value from memory
+							 //random value instead of value from memory
+							//moesi[index][line] = shared ? SHARED : EXCLUSIVE;
+					} 	//if hit, check the state of the line
+					else{
+						state = moesi[index][line];
+					}
+					switch(state){
+						case INVALID:
+							shared = Port_Bus->read(addr,cache_id);
+							c_data[index][line*LINE_SIZE + offset] = line*offset;
 							moesi[index][line] = shared ? SHARED : EXCLUSIVE;
-					} else {	//if hit, check the state of the line
-						switch(state){
-							case INVALID:
-								shared = Port_Bus->read(addr,cache_id);
-								moesi[index][line] = shared ? SHARED : EXCLUSIVE;
-								break;
-							default:
-								break;
-						}
-
-
+							break;
+						default:
+							break;
 					}
 
 					Port_Data.write(c_data[index][line*LINE_SIZE + offset]);
@@ -601,9 +582,14 @@ private:
 
 			if(line == -1){  //no hit
 					line = get_lru(index);
+					//if lru is in state owned, write to the memory
+					save_owned(index,line,addr);
+
 					tags[index][line]=tag;
 
 			}
+
+
 
 			switch(state){
 				case MODIFIED: //write in cache
@@ -691,7 +677,7 @@ private:
 						MOESIState state = moesi[index][line];
 						if(request == Bus::BUS_READ_X){
 							switch(state){
-								case MODIFIED: //flush, cahgne state to invalid
+								case MODIFIED: //flush, change state to invalid
 									Port_Bus->flush(addr,0,cache_id);
 									moesi[index][line] = INVALID;
 									break;
@@ -763,8 +749,14 @@ private:
 				}
 
 
+				//write an owned cache line back to memory
+	  void save_owned(uint32_t index,uint32_t line, uint32_t addr){
 
-
+			if(moesi[index][line]==OWNED || moesi[index][line]==MODIFIED)
+			{
+				Port_Bus->write(addr,0,cache_id);
+			}
+		}
 
 
 		int hit(int index,int tag){ //returns the index of the line with the same tag or if miss -1
@@ -837,83 +829,7 @@ public:
 private:
 
 		void execute()
-		{/*
-			TraceFile::Entry    tr_data;
-				Cache::Function  f;
-
-				// Loop until end of tracefile
-				while(!tracefile_ptr->eof())
-				{
-						// Get the next action for the processor in the trace
-						if(!tracefile_ptr->next(cpu_id, tr_data))
-						{
-								cerr << "Error reading trace for CPU" << endl;
-								break;
-						}
-
-						// To demonstrate the statistic functions, we generate a 50%
-						// probability of a 'hit' or 'miss', and call the statistic
-						// functions below
-						int j = rand()%2;
-
-						switch(tr_data.type)
-						{
-								case TraceFile::ENTRY_TYPE_READ:
-										f = Cache::FUNC_READ;
-										if(j)
-												stats_readhit(0);
-										else
-												stats_readmiss(0);
-										break;
-
-								case TraceFile::ENTRY_TYPE_WRITE:
-										f = Cache::FUNC_WRITE;
-										if(j)
-												stats_writehit(0);
-										else
-												stats_writemiss(0);
-										break;
-
-								case TraceFile::ENTRY_TYPE_NOP:
-										break;
-
-								default:
-										cerr << "Error, got invalid data from Trace" << endl;
-										exit(0);
-						}
-
-						if(tr_data.type != TraceFile::ENTRY_TYPE_NOP)
-						{
-								Port_MemAddr.write(tr_data.addr);
-								Port_MemFunc.write(f);
-
-								if (f == Cache::FUNC_WRITE)
-								{
-										cout << sc_time_stamp() << ": CPU sends write" << endl;
-
-										uint32_t data = rand();
-										Port_MemData.write(data);
-										wait();
-										Port_MemData.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
-								}
-								else
-								{
-										cout << sc_time_stamp() << ": CPU sends read" << endl;
-								}
-
-								wait(Port_MemDone.value_changed_event());
-
-								if (f == Cache::FUNC_READ)
-								{
-										cout << sc_time_stamp() << ": CPU reads: " << Port_MemData.read() << endl;
-								}
-						}
-						else
-						{
-								cout << sc_time_stamp() << ": CPU executes NOP" << endl;
-						}
-						// Advance one cycle in simulated time
-						wait();*/
+		{
 
 				TraceFile::Entry    tr_data;
 				Cache::Function  f;
@@ -1053,7 +969,7 @@ int sc_main(int argc, char* argv[])
 				//Bus
 				sc_signal<Bus::Function, SC_MANY_WRITERS>        sigBusFunction;
 				sc_signal<Bus::RequestType, SC_MANY_WRITERS>     sigBusRequest;
-				sc_signal<bool, SC_MANY_WRITERS>                 sigBusShared;
+				sc_signal<int, SC_MANY_WRITERS>                 sigBusShared;
 				sc_signal<int, SC_MANY_WRITERS>                  sigBusLocked;
 				sc_signal<int, SC_MANY_WRITERS>                  sigBusWriter;
 				sc_signal_rv<32>    		  			 sigBusAddress;
@@ -1118,7 +1034,7 @@ int sc_main(int argc, char* argv[])
 				cout << "Running (press CTRL+C to interrupt)... " << endl;
 
 				sc_trace_file* wf;
-				wf = sc_create_vcd_trace_file("task_2");
+				wf = sc_create_vcd_trace_file("task_3");
 				unsigned int i = 0;
 				for( ;i<num_cpus;i++){
 				sc_trace(wf,sigMemFunc[i],to_string(i)+"MemFunc");
@@ -1134,6 +1050,7 @@ int sc_main(int argc, char* argv[])
 				sc_trace(wf,sigBusRequest,"BusRequest");
 				sc_trace(wf,sigBusLocked,"BusLocked");
 				sc_trace(wf,sigBusWriter,"BusWriter");
+			  sc_trace(wf,sigBusShared,"BusShared");
 
 
 				// Start Simulation
@@ -1149,9 +1066,15 @@ int sc_main(int argc, char* argv[])
 				//The time measures can be based on real time or simulation time
 				//The duration it takes a thread to lock the bus mutex is given in simulation time
 				cout << "Average Wait Duration for Bus Access(Simulation Time): " << bus.get_average_wait() << "ns" <<endl;
+				cout << "Average Duration of a Write/Read Request after waiting for the Bus Access: " << bus.get_average_memory_access() << "ns" <<endl;
 				//The total duration of the execution of this Program is given in real time
 				cout << "Total Duration: " << (stop - start)/double(CLOCKS_PER_SEC)*1000 <<"ms"<< endl;
-
+				cout << bus.flush_count << " received: " << bus.flush_received_count <<endl;
+				cout << "Total number of cache to cache transfers: " << bus.flush_received_count <<endl;
+				cout << "Total number of BusUpgr: " << bus.upgr_count <<endl;
+				cout << "Total number of BusRd: " << bus.read_count << endl;
+				cout << "Total number of BusRdX: " << bus.read_x_count <<endl;
+				cout << "BusUpgr + BusRd + BusRdX= " << bus.upgr_count+ bus.read_count + bus.read_x_count <<endl;
 		}
 
 		catch (exception& e)
